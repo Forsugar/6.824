@@ -10,6 +10,8 @@ import "os"
 import "net/rpc"
 import "net/http"
 
+const maxTaskTime = 10 // seconds
+
 type MapTaskState struct {
 	beginSecond int64
 	workId      int
@@ -19,7 +21,7 @@ type MapTaskState struct {
 type ReduceTaskState struct {
 	beginSecond int64
 	workId      int
-	reduceId    int
+	//reduceId    int
 }
 
 type Master struct {
@@ -114,14 +116,127 @@ func mapDoneProcess(reply *MapTaskReply) {
 }
 
 func (m *Master) joinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) error {
+	fileId := args.fileId
+	workerId := args.workerId
+
+	// check current time for whether the worker has timed out
+	log.Printf("got join map request from worker %v on file %v %v\n", workerId, fileId, m.filename[fileId])
+
+	m.issuedMapMutex.Lock()
+	currTime := getNowTimeSecond()
+
+	//file map already finish
+	if !m.issuedMapTasks.Has(fileId) {
+		m.issuedMapMutex.Unlock()
+		log.Printf("task abandon or don't exist")
+		reply.accept = false
+		return nil
+	}
+	//not this worker
+	if m.mapTasks[fileId].workId != workerId {
+		m.issuedMapMutex.Unlock()
+		log.Printf("task%v don't belong to worker%v", fileId, workerId)
+		reply.accept = false
+		return nil
+	}
+	// time out
+	if currTime-m.mapTasks[fileId].beginSecond > maxTaskTime {
+		log.Println("task exceeds max wait time, abadoning...")
+		//m.issuedMapTasks.Remove(fileId)
+		m.unIssuedMapTasks.PutFront(fileId)
+		m.issuedMapMutex.Unlock()
+		reply.accept = false
+	} else {
+		log.Println("task within max wait time, accepting...")
+		m.issuedMapTasks.Remove(fileId)
+		m.issuedMapMutex.Unlock()
+		reply.accept = true
+	}
 	return nil
 }
 
 func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) error {
+	workerId := args.workerId
+	m.issuedReduceMutex.Lock()
+	if m.allDone {
+		m.issuedReduceMutex.Unlock()
+		log.Printf("all reduce task already finish")
+		allDoneProcess(reply)
+		return nil
+	}
+	if m.unIssuedReduceTasks.Size() == 0 && m.issuedReduceTasks.Size() == 0 {
+		m.issuedReduceMutex.Unlock()
+		m.allDone = true
+		log.Printf("all reduce task finish")
+		allDoneProcess(reply)
+		return nil
+	}
+	log.Printf("%v unissued reduce tasks %v issued reduce tasks at hand\n", m.unIssuedReduceTasks.Size(), m.issuedReduceTasks.Size())
+	m.issuedReduceMutex.Unlock()
+
+	currTime := getNowTimeSecond()
+	ret, error := m.unIssuedReduceTasks.PopBack()
+	var reduceId int
+	if error != nil {
+		reduceId = -1
+		log.Printf("no map task yet, let worker wait...")
+	} else {
+		reduceId = ret.(int)
+
+		m.issuedReduceMutex.Lock()
+		m.reduceTasks[reduceId].beginSecond = currTime
+		m.reduceTasks[reduceId].workId = workerId
+		m.issuedReduceTasks.Insert(reduceId)
+		m.issuedReduceMutex.Unlock()
+		log.Printf("giving reduce task %v at second %v\n", reduceId, currTime)
+	}
+	reply.reduceId = reduceId
+	reply.nReduce = m.nReduce
+	reply.allDone = false
+	reply.fileCount = len(m.filename)
+
 	return nil
 }
 
+func allDoneProcess(reply *ReduceTaskReply) {
+	reply.allDone = true
+	reply.reduceId = -1
+}
+
 func (m *Master) joinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinReply) error {
+	workerId := args.workerId
+	reduceId := args.reduceId
+
+	// check current time for whether the worker has timed out
+	log.Printf("got join reduce request from worker %v reduceID %v\n", workerId, reduceId)
+
+	m.issuedReduceMutex.Lock()
+	currTime := getNowTimeSecond()
+
+	if !m.issuedMapTasks.Has(reduceId) {
+		m.issuedReduceMutex.Unlock()
+		reply.accept = false
+		log.Printf("task abandon or don't exist")
+		return nil
+	}
+	if m.reduceTasks[reduceId].workId != workerId {
+		m.issuedReduceMutex.Unlock()
+		reply.accept = false
+		log.Printf("task%v don't belong to worker%v", reduceId, workerId)
+		return nil
+	}
+
+	if currTime-m.reduceTasks[reduceId].beginSecond > maxTaskTime {
+		log.Println("task exceeds max wait time, abadoning...")
+		m.unIssuedReduceTasks.PutFront(reduceId)
+		reply.accept = false
+	} else {
+		log.Println("task exceeds max wait time, abadoning...")
+		m.issuedMapTasks.Remove(reduceId)
+		reply.accept = true
+	}
+	m.issuedReduceMutex.Unlock()
+
 	return nil
 }
 
