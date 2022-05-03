@@ -12,16 +12,9 @@ import "net/http"
 
 const maxTaskTime = 10 // seconds
 
-type MapTaskState struct {
+type TaskState struct {
 	beginSecond int64
 	workId      int
-	//fileId      int
-}
-
-type ReduceTaskState struct {
-	beginSecond int64
-	workId      int
-	//reduceId    int
 }
 
 type Master struct {
@@ -40,8 +33,8 @@ type Master struct {
 	issuedReduceMutex   sync.Mutex
 
 	//task states
-	mapTasks    []MapTaskState
-	reduceTasks []ReduceTaskState
+	mapTasks    []TaskState
+	reduceTasks []TaskState
 
 	//status
 	mapDone bool
@@ -62,13 +55,13 @@ func (m *Master) giveMapTask(args *MapTaskArgs, reply *MapTaskReply) error {
 	m.issuedMapMutex.Lock()
 	if m.mapDone {
 		m.issuedMapMutex.Unlock()
-		mapDoneProcess(reply)
+		processReplyIfMapDone(reply)
 		return nil
 	}
 	if m.unIssuedMapTasks.Size() == 0 && m.issuedMapTasks.Size() == 0 {
 		m.issuedMapMutex.Unlock()
 		m.mapDone = true
-		mapDoneProcess(reply)
+		processReplyIfMapDone(reply)
 		m.preparedAllReduceTasks()
 		return nil
 	}
@@ -109,7 +102,7 @@ func getNowTimeSecond() int64 {
 	return time.Now().UnixNano() / int64(time.Second)
 }
 
-func mapDoneProcess(reply *MapTaskReply) {
+func processReplyIfMapDone(reply *MapTaskReply) {
 	log.Println("all map tasks complete, telling workers to switch to reduce mode")
 	reply.fileId = -1
 	reply.allDone = true
@@ -125,14 +118,14 @@ func (m *Master) joinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) err
 	m.issuedMapMutex.Lock()
 	currTime := getNowTimeSecond()
 
-	//file map already finish
+	//file map already finish or removed by loop remove thread
 	if !m.issuedMapTasks.Has(fileId) {
 		m.issuedMapMutex.Unlock()
 		log.Printf("task abandon or don't exist")
 		reply.accept = false
 		return nil
 	}
-	//not this worker
+	//not this worker or removed by loop remove thread then send to other worker
 	if m.mapTasks[fileId].workId != workerId {
 		m.issuedMapMutex.Unlock()
 		log.Printf("task%v don't belong to worker%v", fileId, workerId)
@@ -142,7 +135,7 @@ func (m *Master) joinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) err
 	// time out
 	if currTime-m.mapTasks[fileId].beginSecond > maxTaskTime {
 		log.Println("task exceeds max wait time, abadoning...")
-		//m.issuedMapTasks.Remove(fileId)
+		m.issuedMapTasks.Remove(fileId)
 		m.unIssuedMapTasks.PutFront(fileId)
 		m.issuedMapMutex.Unlock()
 		reply.accept = false
@@ -161,14 +154,14 @@ func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) er
 	if m.allDone {
 		m.issuedReduceMutex.Unlock()
 		log.Printf("all reduce task already finish")
-		allDoneProcess(reply)
+		processReplyIfAllDone(reply)
 		return nil
 	}
 	if m.unIssuedReduceTasks.Size() == 0 && m.issuedReduceTasks.Size() == 0 {
 		m.issuedReduceMutex.Unlock()
 		m.allDone = true
 		log.Printf("all reduce task finish")
-		allDoneProcess(reply)
+		processReplyIfAllDone(reply)
 		return nil
 	}
 	log.Printf("%v unissued reduce tasks %v issued reduce tasks at hand\n", m.unIssuedReduceTasks.Size(), m.issuedReduceTasks.Size())
@@ -188,6 +181,7 @@ func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) er
 		m.reduceTasks[reduceId].workId = workerId
 		m.issuedReduceTasks.Insert(reduceId)
 		m.issuedReduceMutex.Unlock()
+
 		log.Printf("giving reduce task %v at second %v\n", reduceId, currTime)
 	}
 	reply.reduceId = reduceId
@@ -198,7 +192,7 @@ func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) er
 	return nil
 }
 
-func allDoneProcess(reply *ReduceTaskReply) {
+func processReplyIfAllDone(reply *ReduceTaskReply) {
 	reply.allDone = true
 	reply.reduceId = -1
 }
@@ -213,12 +207,14 @@ func (m *Master) joinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinR
 	m.issuedReduceMutex.Lock()
 	currTime := getNowTimeSecond()
 
+	// maybe removed by loopRemove thread because of time out
 	if !m.issuedMapTasks.Has(reduceId) {
 		m.issuedReduceMutex.Unlock()
 		reply.accept = false
 		log.Printf("task abandon or don't exist")
 		return nil
 	}
+	// maybe removed by loopRemove thread and then this task is sent to other worker
 	if m.reduceTasks[reduceId].workId != workerId {
 		m.issuedReduceMutex.Unlock()
 		reply.accept = false
@@ -226,12 +222,14 @@ func (m *Master) joinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinR
 		return nil
 	}
 
+	//time out
 	if currTime-m.reduceTasks[reduceId].beginSecond > maxTaskTime {
 		log.Println("task exceeds max wait time, abadoning...")
+		m.issuedReduceTasks.Remove(reduceId)
 		m.unIssuedReduceTasks.PutFront(reduceId)
 		reply.accept = false
 	} else {
-		log.Println("task exceeds max wait time, abadoning...")
+		log.Println("task within max wait time, accepting...")
 		m.issuedMapTasks.Remove(reduceId)
 		reply.accept = true
 	}
@@ -274,12 +272,34 @@ func (m *Master) Done() bool {
 	ret := false
 
 	// Your code here.
+	if m.allDone {
+		ret = true
+		log.Println("asked whether i am done, replying yes...")
+	} else {
+		log.Println("asked whether i am done, replying no...")
+	}
 
 	return ret
 }
 
-func (m *Master) loopRemoveTimeOutMap() {
+func (m *Master) loopRemoveTimeOutTasks() {
+	for true {
+		time.Sleep(2 * 1000 * time.Millisecond)
+		m.removeTimeOutTasks()
+	}
+}
 
+func (m *Master) removeTimeOutTasks() {
+	//stop the world
+	log.Println("removing timeout tasks...")
+
+	m.issuedMapMutex.Lock()
+	m.issuedMapTasks.removeTimeOutTasksFromMapSet(m.unIssuedMapTasks, m.mapTasks, "map")
+	m.issuedMapMutex.Unlock()
+
+	m.issuedReduceMutex.Lock()
+	m.issuedReduceTasks.removeTimeOutTasksFromMapSet(m.unIssuedReduceTasks, m.reduceTasks, "reduce")
+	m.issuedReduceMutex.Unlock()
 }
 
 //
@@ -304,8 +324,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.unIssuedReduceTasks = NewBlockQueue()
 	m.issuedMapTasks = NewMapSet()
 
-	m.mapTasks = make([]MapTaskState, len(files))
-	m.reduceTasks = make([]ReduceTaskState, nReduce)
+	m.mapTasks = make([]TaskState, len(files))
+	m.reduceTasks = make([]TaskState, nReduce)
 
 	m.mapDone = false
 	m.allDone = false
@@ -314,7 +334,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 	log.Println("listening started...")
 
 	// starts a thread that abandons timeout tasks
-	go m.loopRemoveTimeOutMap()
+	go m.loopRemoveTimeOutTasks()
 
 	// all are unissued map tasks
 	// send to channel after everything else initializes

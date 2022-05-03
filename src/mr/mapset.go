@@ -1,5 +1,7 @@
 package mr
 
+import "log"
+
 type MapSet struct {
 	mapbool map[interface{}]bool
 	count   int
@@ -28,4 +30,17 @@ func (m *MapSet) Remove(data interface{}) {
 
 func (m *MapSet) Size() int {
 	return m.count
+}
+
+func (m *MapSet) removeTimeOutTasksFromMapSet(tasks *BlockQueue, taskStates []TaskState, name string) {
+	for id, issued := range m.mapbool {
+		currTime := getNowTimeSecond()
+		if issued {
+			if currTime-taskStates[id.(int)].beginSecond > maxTaskTime {
+				log.Printf(name+": worker %v on task %v abandoned due to timeout\n", taskStates[id.(int)].workId, id)
+				m.Remove(id.(int))
+				tasks.PutFront(id.(int))
+			}
+		}
+	}
 }

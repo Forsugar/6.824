@@ -102,6 +102,7 @@ func (worker *AWorker) askForMapTask() *MapTaskReply {
 	if reply.fileId == -1 {
 		if reply.allDone {
 			worker.logPrintf("no more map tasks, switch to reduce mode\n")
+			return nil
 		} else {
 			return &reply
 		}
