@@ -14,19 +14,7 @@ const maxTaskTime = 10 // seconds
 
 type TaskState struct {
 	BeginSecond int64
-	WorkId      int
-}
-
-type MapTaskState struct {
-	BeginSecond int64
-	WorkId      int
-	//FileId int
-}
-
-type ReduceTaskState struct {
-	BeginSecond int64
-	WorkId      int
-	//reduceId int
+	WorkerId    int
 }
 
 type Master struct {
@@ -45,8 +33,8 @@ type Master struct {
 	IssuedReduceMutex   sync.Mutex
 
 	//task states
-	MapTasks    []MapTaskState
-	ReduceTasks []ReduceTaskState
+	MapTasks    []TaskState
+	ReduceTasks []TaskState
 
 	//status
 	MapDone bool
@@ -91,7 +79,7 @@ func (m *Master) GiveMapTask(args *MapTaskArgs, reply *MapTaskReply) error {
 		reply.FileName = m.Filename[fileId]
 		m.IssuedMapMutex.Lock()
 		m.MapTasks[fileId].BeginSecond = currTime
-		m.MapTasks[fileId].WorkId = reply.WorkerId
+		m.MapTasks[fileId].WorkerId = reply.WorkerId
 		m.IssuedMapTasks.Insert(fileId)
 		m.IssuedMapMutex.Unlock()
 		log.Printf("giving map task %v on file %v at second %v\n", fileId, reply.FileName, currTime)
@@ -138,7 +126,7 @@ func (m *Master) JoinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) err
 		return nil
 	}
 	//not this worker or removed by loop remove thread then send to other worker
-	if m.MapTasks[fileId].WorkId != workerId {
+	if m.MapTasks[fileId].WorkerId != workerId {
 		m.IssuedMapMutex.Unlock()
 		log.Printf("task%v don't belong to worker%v", fileId, workerId)
 		reply.Accept = false
@@ -190,7 +178,7 @@ func (m *Master) GiveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) er
 
 		m.IssuedReduceMutex.Lock()
 		m.ReduceTasks[reduceId].BeginSecond = currTime
-		m.ReduceTasks[reduceId].WorkId = workerId
+		m.ReduceTasks[reduceId].WorkerId = workerId
 		m.IssuedReduceTasks.Insert(reduceId)
 		m.IssuedReduceMutex.Unlock()
 
@@ -227,7 +215,7 @@ func (m *Master) JoinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinR
 		return nil
 	}
 	// maybe removed by loopRemove thread and then this task is sent to other worker
-	if m.ReduceTasks[reduceId].WorkId != workerId {
+	if m.ReduceTasks[reduceId].WorkerId != workerId {
 		m.IssuedReduceMutex.Unlock()
 		reply.Accept = false
 		log.Printf("task%v don't belong to worker%v", reduceId, workerId)
@@ -306,13 +294,13 @@ func (m *Master) removeTimeOutTasks() {
 	log.Println("removing timeout tasks...")
 
 	m.IssuedMapMutex.Lock()
-	//m.issuedMapTasks.removeTimeOutTasksFromMapSet(m.unIssuedMapTasks, m.mapTasks, "map")
-	m.IssuedMapTasks.RemoveTimeoutMapTasks(m.MapTasks, m.UnIssuedMapTasks)
+	m.IssuedMapTasks.RemoveTimeOutTasksFromMapSet(m.UnIssuedMapTasks, m.MapTasks, "map")
+	//m.IssuedMapTasks.RemoveTimeoutMapTasks(m.MapTasks, m.UnIssuedMapTasks)
 	m.IssuedMapMutex.Unlock()
 
 	m.IssuedReduceMutex.Lock()
-	//m.issuedReduceTasks.removeTimeOutTasksFromMapSet(m.unIssuedReduceTasks, m.reduceTasks, "reduce")
-	m.IssuedReduceTasks.removeTimeoutReduceTasks(m.ReduceTasks, m.UnIssuedReduceTasks)
+	m.IssuedReduceTasks.RemoveTimeOutTasksFromMapSet(m.UnIssuedReduceTasks, m.ReduceTasks, "reduce")
+	//m.IssuedReduceTasks.RemoveTimeoutReduceTasks(m.ReduceTasks, m.UnIssuedReduceTasks)
 	m.IssuedReduceMutex.Unlock()
 }
 
@@ -338,8 +326,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.UnIssuedReduceTasks = NewBlockQueue()
 	m.IssuedReduceTasks = NewMapSet() //粗心！
 
-	m.MapTasks = make([]MapTaskState, len(files))
-	m.ReduceTasks = make([]ReduceTaskState, nReduce)
+	m.MapTasks = make([]TaskState, len(files))
+	m.ReduceTasks = make([]TaskState, nReduce)
 
 	m.MapDone = false
 	m.AllDone = false
