@@ -20,66 +20,66 @@ type KeyValue struct {
 }
 
 type MapTaskArgs struct {
-	workerId int
+	WorkerId int
 }
 
 type MapTaskReply struct {
 	//the file that will process by this worker
-	fileName string
+	FileName string
 	//id for each file, -1 means no more file
-	fileId   int
-	nReduce  int
-	workerId int
-	// if not , and fileId is -1, the worker waits
-	allDone bool
+	FileId   int
+	NReduce  int
+	WorkerId int
+	// if not , and FileId is -1, the worker waits
+	AllDone bool
 }
 
 type MapTaskJoinArgs struct {
-	fileId   int
-	workerId int
+	FileId   int
+	WorkerId int
 }
 
 type MapTaskJoinReply struct {
-	accept bool
+	Accept bool
 }
 
 type AWorker struct {
-	mapf    func(string, string) []KeyValue //方法要带返回值
-	reducef func(string, []string) string
+	Mapf    func(string, string) []KeyValue //方法要带返回值
+	Reducef func(string, []string) string
 
 	// true on map   , false on reduce
-	mapOrReduce bool
+	MapOrReduce bool
 	//if true , map and reduce finished
-	allDone  bool
-	workerId int
+	AllDone  bool
+	WorkerId int
 }
 
 func (worker *AWorker) logPrintf(format string, vars ...interface{}) {
-	log.Printf("worker %d: "+format, worker.workerId, vars)
+	log.Printf("worker %d: "+format, worker.WorkerId, vars)
 }
 
 func (worker *AWorker) process() {
-	if worker.allDone {
+	if worker.AllDone {
 
 	}
-	if worker.mapOrReduce {
+	if worker.MapOrReduce {
 		reply := worker.askForMapTask()
 		if reply == nil {
-			worker.mapOrReduce = false
+			worker.MapOrReduce = false
 		} else {
-			if reply.fileId == -1 {
+			if reply.FileId == -1 {
 				// no map task to do now
 			} else {
 				worker.executeMapTask(reply)
 			}
 		}
 	}
-	if !worker.mapOrReduce {
+	if !worker.MapOrReduce {
 		reply := worker.askForReduceTask()
 		if reply == nil {
-			worker.allDone = true
+			worker.AllDone = true
 		} else {
-			if reply.reduceId == -1 {
+			if reply.ReduceId == -1 {
 				// no reduce task to do now
 			} else {
 				worker.executeReduceTask(reply)
@@ -90,33 +90,34 @@ func (worker *AWorker) process() {
 
 func (worker *AWorker) askForMapTask() *MapTaskReply {
 	args := MapTaskArgs{}
-	args.workerId = worker.workerId
+	args.WorkerId = worker.WorkerId
 	reply := MapTaskReply{}
 
 	worker.logPrintf("requesting for map task...\n")
-	call("Coordinator.giveMapTask", &args, &reply)
+	call("Master.GiveMapTask", &args, &reply)
 
 	//obstain a workerId
-	worker.workerId = reply.workerId
+	worker.WorkerId = reply.WorkerId
 
-	if reply.fileId == -1 {
-		if reply.allDone {
+	if reply.FileId == -1 {
+		if reply.AllDone {
 			worker.logPrintf("no more map tasks, switch to reduce mode\n")
 			return nil
 		} else {
 			return &reply
 		}
 	}
-	worker.logPrintf("got map task on file %v %v\n", reply.fileId, reply.fileName)
+	worker.logPrintf("got map task on file %v %v\n", reply.FileId, reply.FileName)
+	worker.logPrintf(reply.FileName)
 	//given a task
 	return &reply
 }
 
 func (worker *AWorker) executeMapTask(reply *MapTaskReply) {
-	intermediate := makeIntermediateFromFile(reply.fileName, worker.mapf)
+	intermediate := makeIntermediateFromFile(reply.FileName, worker.Mapf)
 	worker.logPrintf("writing map results to file\n")
-	worker.writeToFiles(reply.fileId, reply.nReduce, intermediate)
-	worker.joinMapTask(reply.fileId)
+	worker.writeToFiles(reply.FileId, reply.NReduce, intermediate)
+	worker.joinMapTask(reply.FileId)
 }
 
 func (worker *AWorker) writeToFiles(fileId int, nReduce int, intermediate []KeyValue) {
@@ -150,14 +151,14 @@ func (worker *AWorker) writeToFiles(fileId int, nReduce int, intermediate []KeyV
 
 func (worker *AWorker) joinMapTask(fileId int) {
 	args := MapTaskJoinArgs{}
-	args.workerId = worker.workerId
-	args.fileId = fileId
+	args.WorkerId = worker.WorkerId
+	args.FileId = fileId
 	reply := MapTaskJoinReply{}
 
 	worker.logPrintf("begin to join")
-	call("Coordinator.joinMapTask", &args, &reply)
+	call("Master.JoinMapTask", &args, &reply)
 
-	if reply.accept {
+	if reply.Accept {
 		worker.logPrintf("accepted !\n")
 	} else {
 		worker.logPrintf("not accepted !\n")
@@ -193,44 +194,44 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 type ReduceTaskArgs struct {
-	workerId int
+	WorkerId int
 }
 
 type ReduceTaskReply struct {
 	// index of reduce task
-	reduceId  int
-	nReduce   int
-	fileCount int
-	allDone   bool
+	ReduceId  int
+	NReduce   int
+	FileCount int
+	AllDone   bool
 }
 
 type ReduceTaskJoinArgs struct {
-	workerId int
-	reduceId int
+	WorkerId int
+	ReduceId int
 }
 
 type ReduceTaskJoinReply struct {
-	accept bool
+	Accept bool
 }
 
 func (worker *AWorker) askForReduceTask() *ReduceTaskReply {
 	args := ReduceTaskArgs{}
-	args.workerId = worker.workerId
+	args.WorkerId = worker.WorkerId
 	reply := ReduceTaskReply{}
 
-	worker.logPrintf("requesting for map task...\n")
-	call("Coordinator.giveReduceTask", &args, &reply)
+	worker.logPrintf("requesting for reduce task...\n")
+	call("Master.GiveReduceTask", &args, &reply)
 
 	// refused to give a task
-	if reply.reduceId == -1 {
-		if reply.allDone {
+	if reply.ReduceId == -1 {
+		if reply.AllDone {
 			worker.logPrintf("no more reduce tasks, try to terminate worker\n")
 			return nil
 		} else {
 			return &reply
 		}
 	}
-	worker.logPrintf("got reduce task on %vth cluster", reply.reduceId)
+	worker.logPrintf("got reduce task on %vth cluster", reply.ReduceId)
 
 	//give a reduce task
 	return &reply
@@ -238,35 +239,35 @@ func (worker *AWorker) askForReduceTask() *ReduceTaskReply {
 
 func (worker *AWorker) executeReduceTask(reply *ReduceTaskReply) {
 	intermediate := make([]KeyValue, 0)
-	for i := 0; i < reply.fileCount; i++ {
-		intermediate = append(intermediate, readIntermediate(i, reply.reduceId)...) //三个点的作用：解包切片
+	for i := 0; i < reply.FileCount; i++ {
+		intermediate = append(intermediate, readIntermediate(i, reply.ReduceId)...) //三个点的作用：解包切片
 	}
 	worker.logPrintf("total intermediate count %v\n", len(intermediate))
 
-	outName := fmt.Sprintf("mr-out-%d", reply.reduceId)
+	outName := fmt.Sprintf("mr-out-%d", reply.ReduceId)
 	file, error := os.Create(outName)
 	if error != nil {
 		worker.logPrintf("reduce task create outfile failed\n")
 	}
-	reduceKVSlice(intermediate, worker.reducef, file)
+	reduceKVSlice(intermediate, worker.Reducef, file)
 	file.Close()
 
-	worker.joinReduceTask(reply.reduceId)
+	worker.joinReduceTask(reply.ReduceId)
 }
 
 func (worker *AWorker) joinReduceTask(reduceId int) {
 	args := ReduceTaskJoinArgs{}
-	args.workerId = worker.workerId
-	args.reduceId = reduceId
+	args.WorkerId = worker.WorkerId
+	args.ReduceId = reduceId
 	reply := ReduceTaskJoinReply{}
 
-	worker.logPrintf("reduce begin join")
-	call("Coordinator.joinReduceTask", &args, &reply)
+	worker.logPrintf("reduce begin join\n")
+	call("Master.JoinReduceTask", &args, &reply)
 
-	if reply.accept {
-		worker.logPrintf("accepted!")
+	if reply.Accept {
+		worker.logPrintf("accepted!\n")
 	} else {
-		worker.logPrintf("not accept!")
+		worker.logPrintf("not accept!\n")
 	}
 }
 
@@ -329,17 +330,17 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	worker := AWorker{}
-	worker.mapf = mapf
-	worker.reducef = reducef
-	worker.mapOrReduce = true
-	worker.allDone = false
-	worker.workerId = -1
+	worker.Mapf = mapf
+	worker.Reducef = reducef
+	worker.MapOrReduce = true
+	worker.AllDone = false
+	worker.WorkerId = -1
 	worker.logPrintf("initialized!\n")
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
 
-	for !worker.allDone {
+	for !worker.AllDone {
 		worker.process()
 	}
 	worker.logPrintf("all finished!\n")

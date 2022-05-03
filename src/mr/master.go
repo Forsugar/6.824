@@ -13,88 +13,100 @@ import "net/http"
 const maxTaskTime = 10 // seconds
 
 type TaskState struct {
-	beginSecond int64
-	workId      int
+	BeginSecond int64
+	WorkId      int
+}
+
+type MapTaskState struct {
+	BeginSecond int64
+	WorkId      int
+	//FileId int
+}
+
+type ReduceTaskState struct {
+	BeginSecond int64
+	WorkId      int
+	//reduceId int
 }
 
 type Master struct {
 	// Your definitions here.
-	filename []string
-	nReduce  int
+	Filename []string
+	NReduce  int
 
-	currWorkId int
+	CurrWorkId int
 
-	unIssuedMapTasks *BlockQueue
-	issuedMapTasks   *MapSet
-	issuedMapMutex   sync.Mutex
+	UnIssuedMapTasks *BlockQueue
+	IssuedMapTasks   *MapSet
+	IssuedMapMutex   sync.Mutex
 
-	unIssuedReduceTasks *BlockQueue
-	issuedReduceTasks   *MapSet
-	issuedReduceMutex   sync.Mutex
+	UnIssuedReduceTasks *BlockQueue
+	IssuedReduceTasks   *MapSet
+	IssuedReduceMutex   sync.Mutex
 
 	//task states
-	mapTasks    []TaskState
-	reduceTasks []TaskState
+	MapTasks    []MapTaskState
+	ReduceTasks []ReduceTaskState
 
 	//status
-	mapDone bool
-	allDone bool
+	MapDone bool
+	AllDone bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-func (m *Master) giveMapTask(args *MapTaskArgs, reply *MapTaskReply) error {
-	if args.workerId == -1 {
-		m.currWorkId++
-		reply.workerId = m.currWorkId
+func (m *Master) GiveMapTask(args *MapTaskArgs, reply *MapTaskReply) error {
+	if args.WorkerId == -1 {
+		m.CurrWorkId++
+		reply.WorkerId = m.CurrWorkId
 	} else {
-		reply.workerId = args.workerId
+		reply.WorkerId = args.WorkerId
 	}
-	log.Printf("worker %v asks for a map task\n", reply.workerId)
+	log.Printf("worker %v asks for a map task\n", reply.WorkerId)
 
-	m.issuedMapMutex.Lock()
-	if m.mapDone {
-		m.issuedMapMutex.Unlock()
+	m.IssuedMapMutex.Lock()
+	if m.MapDone {
+		m.IssuedMapMutex.Unlock()
 		processReplyIfMapDone(reply)
 		return nil
 	}
-	if m.unIssuedMapTasks.Size() == 0 && m.issuedMapTasks.Size() == 0 {
-		m.issuedMapMutex.Unlock()
-		m.mapDone = true
+	if m.UnIssuedMapTasks.Size() == 0 && m.IssuedMapTasks.Size() == 0 {
+		m.IssuedMapMutex.Unlock()
+		m.MapDone = true
 		processReplyIfMapDone(reply)
 		m.preparedAllReduceTasks()
 		return nil
 	}
 
-	log.Printf("%v unissued map tasks %v issued map tasks at hand\n", m.unIssuedMapTasks.Size(), m.issuedMapTasks.Size())
-	m.issuedMapMutex.Unlock() // release lock to allow unissued update
+	log.Printf("%v unissued map tasks %v issued map tasks at hand\n", m.UnIssuedMapTasks.Size(), m.IssuedMapTasks.Size())
+	m.IssuedMapMutex.Unlock() // release lock to allow unissued update
 	currTime := getNowTimeSecond()
-	ret, error := m.unIssuedMapTasks.PopBack()
+	ret, error := m.UnIssuedMapTasks.PopBack()
 	var fileId int
 	if error != nil {
 		log.Println("no map task yet, let worker wait...")
 		fileId = -1
 	} else {
 		fileId = ret.(int)
-		reply.fileName = m.filename[fileId]
-		m.issuedMapMutex.Lock()
-		m.mapTasks[fileId].beginSecond = currTime
-		m.mapTasks[fileId].workId = reply.workerId
-		m.issuedMapTasks.Insert(fileId)
-		m.issuedMapMutex.Unlock()
-		log.Printf("giving map task %v on file %v at second %v\n", fileId, reply.fileName, currTime)
+		reply.FileName = m.Filename[fileId]
+		m.IssuedMapMutex.Lock()
+		m.MapTasks[fileId].BeginSecond = currTime
+		m.MapTasks[fileId].WorkId = reply.WorkerId
+		m.IssuedMapTasks.Insert(fileId)
+		m.IssuedMapMutex.Unlock()
+		log.Printf("giving map task %v on file %v at second %v\n", fileId, reply.FileName, currTime)
 	}
-	reply.fileId = fileId
-	reply.allDone = false
-	reply.nReduce = m.nReduce
+	reply.FileId = fileId
+	reply.AllDone = false
+	reply.NReduce = m.NReduce
 
 	return nil
 }
 
 func (m *Master) preparedAllReduceTasks() {
-	for i := 0; i < m.nReduce; i++ {
-		log.Printf("sending %vth file map task to channel\n", i)
-		m.unIssuedMapTasks.PutFront(i)
+	for i := 0; i < m.NReduce; i++ {
+		log.Printf("sending %vth file reduce task to channel\n", i)
+		m.UnIssuedReduceTasks.PutFront(i)
 	}
 }
 
@@ -104,71 +116,71 @@ func getNowTimeSecond() int64 {
 
 func processReplyIfMapDone(reply *MapTaskReply) {
 	log.Println("all map tasks complete, telling workers to switch to reduce mode")
-	reply.fileId = -1
-	reply.allDone = true
+	reply.FileId = -1
+	reply.AllDone = true
 }
 
-func (m *Master) joinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) error {
-	fileId := args.fileId
-	workerId := args.workerId
+func (m *Master) JoinMapTask(args *MapTaskJoinArgs, reply *MapTaskJoinReply) error {
+	fileId := args.FileId
+	workerId := args.WorkerId
 
 	// check current time for whether the worker has timed out
-	log.Printf("got join map request from worker %v on file %v %v\n", workerId, fileId, m.filename[fileId])
+	log.Printf("got join map request from worker %v on file %v %v\n", workerId, fileId, m.Filename[fileId])
 
-	m.issuedMapMutex.Lock()
+	m.IssuedMapMutex.Lock()
 	currTime := getNowTimeSecond()
 
 	//file map already finish or removed by loop remove thread
-	if !m.issuedMapTasks.Has(fileId) {
-		m.issuedMapMutex.Unlock()
+	if !m.IssuedMapTasks.Has(fileId) {
+		m.IssuedMapMutex.Unlock()
 		log.Printf("task abandon or don't exist")
-		reply.accept = false
+		reply.Accept = false
 		return nil
 	}
 	//not this worker or removed by loop remove thread then send to other worker
-	if m.mapTasks[fileId].workId != workerId {
-		m.issuedMapMutex.Unlock()
+	if m.MapTasks[fileId].WorkId != workerId {
+		m.IssuedMapMutex.Unlock()
 		log.Printf("task%v don't belong to worker%v", fileId, workerId)
-		reply.accept = false
+		reply.Accept = false
 		return nil
 	}
 	// time out
-	if currTime-m.mapTasks[fileId].beginSecond > maxTaskTime {
+	if currTime-m.MapTasks[fileId].BeginSecond > maxTaskTime {
 		log.Println("task exceeds max wait time, abadoning...")
-		m.issuedMapTasks.Remove(fileId)
-		m.unIssuedMapTasks.PutFront(fileId)
-		m.issuedMapMutex.Unlock()
-		reply.accept = false
+		m.IssuedMapTasks.Remove(fileId)
+		m.UnIssuedMapTasks.PutFront(fileId)
+		m.IssuedMapMutex.Unlock()
+		reply.Accept = false
 	} else {
 		log.Println("task within max wait time, accepting...")
-		m.issuedMapTasks.Remove(fileId)
-		m.issuedMapMutex.Unlock()
-		reply.accept = true
+		m.IssuedMapTasks.Remove(fileId)
+		m.IssuedMapMutex.Unlock()
+		reply.Accept = true
 	}
 	return nil
 }
 
-func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) error {
-	workerId := args.workerId
-	m.issuedReduceMutex.Lock()
-	if m.allDone {
-		m.issuedReduceMutex.Unlock()
+func (m *Master) GiveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) error {
+	workerId := args.WorkerId
+	m.IssuedReduceMutex.Lock()
+	if m.AllDone {
+		m.IssuedReduceMutex.Unlock()
 		log.Printf("all reduce task already finish")
 		processReplyIfAllDone(reply)
 		return nil
 	}
-	if m.unIssuedReduceTasks.Size() == 0 && m.issuedReduceTasks.Size() == 0 {
-		m.issuedReduceMutex.Unlock()
-		m.allDone = true
+	if m.UnIssuedReduceTasks.Size() == 0 && m.IssuedReduceTasks.Size() == 0 {
+		m.IssuedReduceMutex.Unlock()
+		m.AllDone = true
 		log.Printf("all reduce task finish")
 		processReplyIfAllDone(reply)
 		return nil
 	}
-	log.Printf("%v unissued reduce tasks %v issued reduce tasks at hand\n", m.unIssuedReduceTasks.Size(), m.issuedReduceTasks.Size())
-	m.issuedReduceMutex.Unlock()
+	log.Printf("%v unissued reduce tasks %v issued reduce tasks at hand\n", m.UnIssuedReduceTasks.Size(), m.IssuedReduceTasks.Size())
+	m.IssuedReduceMutex.Unlock()
 
 	currTime := getNowTimeSecond()
-	ret, error := m.unIssuedReduceTasks.PopBack()
+	ret, error := m.UnIssuedReduceTasks.PopBack()
 	var reduceId int
 	if error != nil {
 		reduceId = -1
@@ -176,64 +188,64 @@ func (m *Master) giveReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) er
 	} else {
 		reduceId = ret.(int)
 
-		m.issuedReduceMutex.Lock()
-		m.reduceTasks[reduceId].beginSecond = currTime
-		m.reduceTasks[reduceId].workId = workerId
-		m.issuedReduceTasks.Insert(reduceId)
-		m.issuedReduceMutex.Unlock()
+		m.IssuedReduceMutex.Lock()
+		m.ReduceTasks[reduceId].BeginSecond = currTime
+		m.ReduceTasks[reduceId].WorkId = workerId
+		m.IssuedReduceTasks.Insert(reduceId)
+		m.IssuedReduceMutex.Unlock()
 
 		log.Printf("giving reduce task %v at second %v\n", reduceId, currTime)
 	}
-	reply.reduceId = reduceId
-	reply.nReduce = m.nReduce
-	reply.allDone = false
-	reply.fileCount = len(m.filename)
+	reply.ReduceId = reduceId
+	reply.NReduce = m.NReduce
+	reply.AllDone = false
+	reply.FileCount = len(m.Filename)
 
 	return nil
 }
 
 func processReplyIfAllDone(reply *ReduceTaskReply) {
-	reply.allDone = true
-	reply.reduceId = -1
+	reply.AllDone = true
+	reply.ReduceId = -1
 }
 
-func (m *Master) joinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinReply) error {
-	workerId := args.workerId
-	reduceId := args.reduceId
+func (m *Master) JoinReduceTask(args *ReduceTaskJoinArgs, reply *ReduceTaskJoinReply) error {
+	workerId := args.WorkerId
+	reduceId := args.ReduceId
 
 	// check current time for whether the worker has timed out
 	log.Printf("got join reduce request from worker %v reduceID %v\n", workerId, reduceId)
 
-	m.issuedReduceMutex.Lock()
+	m.IssuedReduceMutex.Lock()
 	currTime := getNowTimeSecond()
 
 	// maybe removed by loopRemove thread because of time out
-	if !m.issuedMapTasks.Has(reduceId) {
-		m.issuedReduceMutex.Unlock()
-		reply.accept = false
+	if !m.IssuedReduceTasks.Has(reduceId) {
+		m.IssuedReduceMutex.Unlock()
+		reply.Accept = false
 		log.Printf("task abandon or don't exist")
 		return nil
 	}
 	// maybe removed by loopRemove thread and then this task is sent to other worker
-	if m.reduceTasks[reduceId].workId != workerId {
-		m.issuedReduceMutex.Unlock()
-		reply.accept = false
+	if m.ReduceTasks[reduceId].WorkId != workerId {
+		m.IssuedReduceMutex.Unlock()
+		reply.Accept = false
 		log.Printf("task%v don't belong to worker%v", reduceId, workerId)
 		return nil
 	}
 
 	//time out
-	if currTime-m.reduceTasks[reduceId].beginSecond > maxTaskTime {
+	if currTime-m.ReduceTasks[reduceId].BeginSecond > maxTaskTime {
 		log.Println("task exceeds max wait time, abadoning...")
-		m.issuedReduceTasks.Remove(reduceId)
-		m.unIssuedReduceTasks.PutFront(reduceId)
-		reply.accept = false
+		m.IssuedReduceTasks.Remove(reduceId)
+		m.UnIssuedReduceTasks.PutFront(reduceId)
+		reply.Accept = false
 	} else {
 		log.Println("task within max wait time, accepting...")
-		m.issuedMapTasks.Remove(reduceId)
-		reply.accept = true
+		m.IssuedReduceTasks.Remove(reduceId)
+		reply.Accept = true
 	}
-	m.issuedReduceMutex.Unlock()
+	m.IssuedReduceMutex.Unlock()
 
 	return nil
 }
@@ -272,7 +284,7 @@ func (m *Master) Done() bool {
 	ret := false
 
 	// Your code here.
-	if m.allDone {
+	if m.AllDone {
 		ret = true
 		log.Println("asked whether i am done, replying yes...")
 	} else {
@@ -293,13 +305,15 @@ func (m *Master) removeTimeOutTasks() {
 	//stop the world
 	log.Println("removing timeout tasks...")
 
-	m.issuedMapMutex.Lock()
-	m.issuedMapTasks.removeTimeOutTasksFromMapSet(m.unIssuedMapTasks, m.mapTasks, "map")
-	m.issuedMapMutex.Unlock()
+	m.IssuedMapMutex.Lock()
+	//m.issuedMapTasks.removeTimeOutTasksFromMapSet(m.unIssuedMapTasks, m.mapTasks, "map")
+	m.IssuedMapTasks.RemoveTimeoutMapTasks(m.MapTasks, m.UnIssuedMapTasks)
+	m.IssuedMapMutex.Unlock()
 
-	m.issuedReduceMutex.Lock()
-	m.issuedReduceTasks.removeTimeOutTasksFromMapSet(m.unIssuedReduceTasks, m.reduceTasks, "reduce")
-	m.issuedReduceMutex.Unlock()
+	m.IssuedReduceMutex.Lock()
+	//m.issuedReduceTasks.removeTimeOutTasksFromMapSet(m.unIssuedReduceTasks, m.reduceTasks, "reduce")
+	m.IssuedReduceTasks.removeTimeoutReduceTasks(m.ReduceTasks, m.UnIssuedReduceTasks)
+	m.IssuedReduceMutex.Unlock()
 }
 
 //
@@ -314,21 +328,21 @@ func MakeMaster(files []string, nReduce int) *Master {
 	log.SetPrefix("coordinator: ")
 	log.Println("making coordinator")
 
-	m.currWorkId = -1
-	m.filename = files
-	m.nReduce = nReduce
+	m.CurrWorkId = -1
+	m.Filename = files
+	m.NReduce = nReduce
 
-	m.unIssuedMapTasks = NewBlockQueue()
-	m.issuedMapTasks = NewMapSet()
+	m.UnIssuedMapTasks = NewBlockQueue()
+	m.IssuedMapTasks = NewMapSet()
 
-	m.unIssuedReduceTasks = NewBlockQueue()
-	m.issuedMapTasks = NewMapSet()
+	m.UnIssuedReduceTasks = NewBlockQueue()
+	m.IssuedReduceTasks = NewMapSet() //粗心！
 
-	m.mapTasks = make([]TaskState, len(files))
-	m.reduceTasks = make([]TaskState, nReduce)
+	m.MapTasks = make([]MapTaskState, len(files))
+	m.ReduceTasks = make([]ReduceTaskState, nReduce)
 
-	m.mapDone = false
-	m.allDone = false
+	m.MapDone = false
+	m.AllDone = false
 
 	m.server()
 	log.Println("listening started...")
@@ -341,7 +355,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 	log.Printf("file count %d\n", len(files))
 	for i := 0; i < len(files); i++ {
 		log.Printf("sending %vth file map task to channel\n", i)
-		m.unIssuedReduceTasks.PutFront(i)
+		m.UnIssuedMapTasks.PutFront(i)
 	}
 	return &m
 }
