@@ -20,6 +20,9 @@ package raft
 import (
 	"log"
 	"math/rand"
+	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +51,12 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Index int
-	Term  int
+	Index   int
+	Term    int
+	Command interface{}
+
+	IsHeartBeat bool
+	IsEmpty     bool
 }
 
 const (
@@ -86,7 +93,7 @@ type Raft struct {
 	matchIndex []int
 
 	state       string
-	applyCh     chan ApplyMsg
+	applyCh     *chan ApplyMsg
 	loseHBCount int
 }
 
@@ -241,6 +248,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if rf.currentTerm > args.Term {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		reply.CommitIndex = rf.commitIndex
 		rf.logPrintfWithLock("your term need a update, dear %v (%v)", args.LeaderId, args.Term)
 		return
 	} else {
@@ -263,16 +271,24 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	} else {
 		if args.PrevLogIndex+len(args.Entries) <= rf.commitIndex {
 			rf.logPrintfWithLock("already have")
-			reply.Success = false
+			reply.Success = true
 		} else if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			rf.logPrintfWithLock("term don't match")
 			reply.Success = false
+			reply.Term = args.Term
+			reply.CommitIndex = rf.commitIndex
+			return
 		} else {
-			rf.logPrintfWithLock("request append,is Entry,match success")
+			rf.logPrintfWithLock("%v (%v) request append,is Entry,match success", args.LeaderId, args.Term)
+			rf.log = rf.log[0 : args.PrevLogIndex+1] //截断
+			for _, l := range args.Entries {
+				rf.log = append(rf.log, l)
+			}
+
 			reply.Success = true
 
 			if rf.commitIndex < args.LeaderCommit {
-				rf.commitIndex = Min(args.PrevLogIndex, args.LeaderCommit)
+				rf.commitIndex = Min(args.LeaderCommit, Max(args.PrevLogIndex, rf.commitIndex)) // why ??
 			}
 		}
 	}
@@ -284,6 +300,13 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 func Min(x, y int) int {
 	if x < y {
+		return x
+	}
+	return y
+}
+
+func Max(x, y int) int {
+	if x > y {
 		return x
 	}
 	return y
@@ -348,6 +371,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != LEADER {
+		return -1, -1, false
+	}
+
+	term = rf.currentTerm
+	index = len(rf.log) - rf.GetEmptyLogCountWithLock() + 1
+	l := LogEntry{index, term, command, false, false}
+	rf.log = append(rf.log, l)
+
+	rf.logPrintfWithLock("Leader Start log index:%d,term:%d", index, term)
 
 	return index, term, isLeader
 }
@@ -501,7 +537,7 @@ func (rf *Raft) BecomeLeaderWithLock() {
 		rf.matchIndex[i] = 0
 	}
 
-	l := LogEntry{}
+	l := LogEntry{0, rf.currentTerm, -1, false, true}
 	rf.log = append(rf.log, l)
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -539,8 +575,162 @@ func (rf *Raft) HeartBeat() {
 	}
 }
 
-func (rf *Raft) sendAppendEntriesFunc(i int) {
+func (rf *Raft) sendAppendEntriesFunc(peer int) {
+	for {
+		time.Sleep(time.Millisecond * 50)
+		if rf.killed() {
+			return
+		}
+		for {
+			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.logPrintfWithLock("already not a leader")
+				rf.mu.Unlock()
+				return
+			}
+			if rf.nextIndex[peer] >= len(rf.log) {
+				rf.logPrintfWithLock("to %v synchronize process finished", peer)
+				//break
+			}
 
+			//截取要同步的数据
+			//data := make([]LogEntry, len(rf.log)-rf.nextIndex[peer])
+			data := make([]LogEntry, len(rf.log[rf.nextIndex[peer]:len(rf.log)]))
+			copy(data, rf.log[rf.nextIndex[peer]:len(rf.log)])
+
+			args := &AppendEntryArgs{rf.currentTerm, rf.me, rf.nextIndex[peer] - 1, rf.log[rf.nextIndex[peer]-1].Term, data, rf.commitIndex}
+			reply := &AppendEntryReply{}
+
+			rf.mu.Unlock()
+
+			w := sync.WaitGroup{}
+			w.Add(1)
+			var ok bool
+
+			go func() {
+				ok = rf.sendAppendEntries(peer, args, reply)
+				w.Done()
+			}()
+
+			ch := make(chan bool)
+			go func() {
+				w.Wait()
+				ch <- true
+			}()
+
+			select {
+			case <-time.After(100 * time.Millisecond):
+				rf.logPrintf("SYN append entry time out!")
+
+			case <-ch:
+				rf.logPrintf("SYN append entry send finished!")
+			}
+
+			if ok {
+				if reply.Success {
+					rf.mu.Lock()
+					rf.nextIndex[peer] += len(data)
+					rf.matchIndex[peer] = Max(rf.nextIndex[peer]-1, rf.matchIndex[peer])
+					rf.logPrintfWithLock("SYN append entry send success, nextIndex: %v, matchIndex :%v", rf.nextIndex[peer], rf.matchIndex[peer])
+					rf.mu.Unlock()
+				} else {
+					if reply.Term <= rf.currentTerm { //term比我小但是添加失败，是因为没有match，调整nextIndex
+						rf.mu.Lock()
+						rf.logPrintfWithLock("SYN append entry send %v fail, match failed, change to %v", rf.nextIndex[peer], reply.CommitIndex+1)
+						rf.nextIndex[peer] = reply.CommitIndex + 1 //从commit的下一个log开始发
+						rf.mu.Unlock()
+					} else {
+						//waiting for a new leader
+						return
+					}
+				}
+			} else {
+				break
+			}
+
+		}
+	}
+}
+
+func (rf *Raft) GetEmptyLogCountWithLock() int {
+	count := 0
+	for _, l := range rf.log {
+		if l.IsEmpty {
+			count++
+		}
+	}
+	return count
+}
+
+func (rf *Raft) BackWork() {
+	for {
+		time.Sleep(time.Millisecond * 50)
+		if rf.killed() {
+			return
+		}
+		rf.mu.Lock()
+		//log.Print("matchIndex",rf.matchIndex)
+		mi := make([]int, len(rf.matchIndex))
+		copy(mi, rf.matchIndex)
+		mi[rf.me] = len(rf.log) - 1
+		sort.Ints(mi)
+		if rf.state == LEADER {
+			midIndex := len(mi) / 2
+			if rf.log[mi[midIndex]].Term == rf.currentTerm { //不负责为之前任期的leader留下的过半复制log专门进行提交，只能提交自己任期内的log
+				//提交自己任期log时能够自动把之前的都提交了
+				//paper Figure 8
+				rf.commitIndex = Max(mi[midIndex], rf.commitIndex)
+			}
+
+		}
+		rf.persist()
+		for ; rf.lastApplied <= rf.commitIndex; rf.lastApplied++ {
+			log.Printf("Peer %d(%d) :%d apply", rf.me, rf.currentTerm, rf.lastApplied)
+			if rf.log[rf.lastApplied].IsEmpty { //非用户指令，不用apply
+				continue
+			} else {
+				//log.Printf("Peer %d(%d) :apply %d(%d)",rf.me,rf.term,rf.log[rf.lastApplied].LogIndex,rf.log[rf.lastApplied].Command.(int))
+				m := ApplyMsg{true, rf.log[rf.lastApplied].Command, rf.log[rf.lastApplied].Index}
+				*rf.applyCh <- m
+			}
+			//apply
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) LogThread() {
+	for {
+		time.Sleep(100 * time.Millisecond)
+		if rf.killed() {
+			return
+		}
+		rf.mu.Lock()
+		s := ""
+		s += strconv.Itoa(rf.commitIndex)
+		s += "["
+		for _, l := range rf.log {
+			s += strconv.Itoa(l.Term)
+
+			s += "("
+			switch l.Command.(type) {
+			case int:
+				s += strconv.Itoa(l.Command.(int))
+			case string:
+				s += l.Command.(string)
+			default:
+				log.Printf("log type error")
+				log.Fatal()
+			}
+
+			s += ")"
+
+			s += ","
+		}
+		s += "]"
+		log.Print(rf.me, ":", s)
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -554,6 +744,18 @@ func (rf *Raft) sendAppendEntriesFunc(i int) {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+func log_init() {
+	file := "./" + "message" + ".txt"
+	logFile, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	if err != nil {
+		panic(err)
+	}
+	log.SetOutput(logFile) // 将文件设置为log输出的文件
+	log.SetPrefix("[qSkipTool]")
+	log.SetFlags(log.LstdFlags | log.Lshortfile | log.LUTC)
+	return
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -562,14 +764,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = 0
+	rf.currentTerm = 1
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
-	l := LogEntry{0, -1}
+	l := LogEntry{0, 0, -1, false, true}
 	rf.log = append(rf.log, l)
 
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -578,9 +780,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.matchIndex[i] = 0
 	}
 
-	rf.applyCh = applyCh
+	rf.applyCh = &applyCh
 	rf.state = FOLLOWER
 	rf.loseHBCount = 0
+
+	log_init()
 
 	rand.Seed(time.Now().UnixNano())
 
@@ -590,6 +794,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logPrintfWithLock("begin")
 	go rf.Timer()
 	go rf.HeartBeat()
+	go rf.BackWork()
+	go rf.LogThread()
 
 	return rf
 }
