@@ -204,39 +204,101 @@ func (rf *Raft) logPrintfWithLock(format string, vars ...interface{}) {
 //
 // example RequestVote RPC handler.
 //
+//func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+//	// Your code here (2A, 2B).
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//
+//	reply.VoteGranted = true
+//
+//	if len(rf.log) > 0 {
+//		n := len(rf.log)
+//		if rf.log[n-1].Term > args.LastLogTerm ||
+//			(rf.log[n-1].Term == args.LastLogTerm && rf.log[n-1].Index > args.LastLogIndex) {
+//			reply.VoteGranted = false
+//			return
+//		}
+//	}
+//
+//	if args.Term <= rf.currentTerm {
+//		reply.Term = rf.currentTerm
+//		reply.VoteGranted = false
+//		return
+//	} else {
+//		rf.currentTerm = args.Term
+//		if rf.state != FOLLOWER {
+//			rf.BecomeFollowerWithLock()
+//		}
+//		if rf.votedFor != -1 {
+//			reply.VoteGranted = false
+//		} else {
+//			rf.votedFor = args.CandidateId
+//			rf.logPrintfWithLock("voted for %v", args.CandidateId)
+//		}
+//		reply.Term = rf.currentTerm
+//	}
+//}
+
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//log.Printf("Peer %d(%d) :%d(%d) request vote",rf.me,rf.term,args.Candidate,args.Term)
+	if args.Term <= rf.currentTerm {
 
-	reply.VoteGranted = true
+		log.Printf("Peer %d(%d) :%d(%d) request vote,term is less my term,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+		reply.Term = args.Term
+		reply.VoteGranted = false
 
-	if len(rf.log) > 0 {
-		n := len(rf.log)
-		if rf.log[n-1].Term > args.LastLogTerm ||
-			(rf.log[n-1].Term == args.LastLogTerm && rf.log[n-1].Index > args.LastLogIndex) {
+		return
+	} else {
+		if args.LastLogTerm > rf.log[len(rf.log)-1].Term {
+			log.Printf("Peer %d(%d) :%d(%d) request vote,log index is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+			rf.currentTerm = args.Term
+			rf.BecomeFollowerWithLock()
+			rf.votedFor = args.CandidateId
+			rf.persist()
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = true
+			return
+		} else if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
+			if args.LastLogIndex >= len(rf.log) {
+				log.Printf("Peer %d(%d) :%d(%d) request vote,log term is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+				rf.currentTerm = args.Term
+				rf.BecomeFollowerWithLock()
+				rf.votedFor = args.CandidateId
+				rf.persist()
+				reply.Term = rf.currentTerm
+				reply.VoteGranted = true
+				return
+			} else {
+				if rf.state == LEADER { //leader需要转换成为follower，启动定时器
+					rf.currentTerm = args.Term
+					rf.BecomeFollowerWithLock()
+				}
+				//follower和candidate不需要重启定时器，修改term就行了
+				rf.currentTerm = args.Term
+				rf.persist()
+				log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+				reply.Term = rf.currentTerm
+				reply.VoteGranted = false
+				return
+			}
+		} else {
+			log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+			if rf.state == LEADER { //leader需要转换成为follower，启动定时器
+				rf.currentTerm = args.Term
+				rf.BecomeFollowerWithLock()
+			}
+			//follower和candidate不需要重启定时器，修改term就行了
+			rf.currentTerm = args.Term
+			rf.persist()
+			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
 		}
 	}
 
-	if args.Term <= rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return
-	} else {
-		rf.currentTerm = args.Term
-		if rf.state != FOLLOWER {
-			rf.BecomeFollowerWithLock()
-		}
-		if rf.votedFor != -1 {
-			reply.VoteGranted = false
-		} else {
-			rf.votedFor = args.CandidateId
-			rf.logPrintfWithLock("voted for %v", args.CandidateId)
-		}
-		reply.Term = rf.currentTerm
-	}
+	// Your code here (2A, 2B).
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
@@ -257,6 +319,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.BecomeFollowerWithLock()
 			rf.votedFor = args.LeaderId
 		}
+		rf.persist()
 	}
 
 	if len(args.Entries) == 0 {
@@ -413,6 +476,9 @@ func (rf *Raft) Timer() {
 	rf.logPrintf("timer begin to work..")
 	for {
 		time.Sleep(100 * time.Millisecond)
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		if strings.Compare(rf.state, FOLLOWER) == 0 {
 			//rf.logPrintfWithLock("     %v", rf.loseHBCount)
@@ -445,16 +511,18 @@ func (rf *Raft) BecomeCandidate() {
 		}
 
 		rf.currentTerm += 1
-		rf.loseHBCount = 0
+		//rf.loseHBCount = 0
 		rf.votedFor = rf.me
+		rf.persist()
 
 		args := RequestVoteArgs{}
-		reply := RequestVoteReply{}
+		reply := RequestVoteReply{0, false}
 
 		//初始化voteRPC args
 		args.CandidateId = rf.me
 		args.Term = rf.currentTerm
-		args.LastLogIndex = rf.log[len(rf.log)-1].Index
+		//args.LastLogIndex = rf.log[len(rf.log)-1].Index
+		args.LastLogIndex = len(rf.log)
 		args.LastLogTerm = rf.log[len(rf.log)-1].Term
 
 		rf.mu.Unlock()
@@ -469,25 +537,26 @@ func (rf *Raft) BecomeCandidate() {
 			w.Add(1)
 			go func(i int) {
 				ok := rf.sendRequestVote(i, &args, &reply)
+				w.Done()
 				if !ok {
 					return
 				}
-
-				if reply.VoteGranted {
-					atomic.AddInt32(&count, 1)
-				}
-				w.Done()
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				if reply.Term > rf.currentTerm {
-					rf.BecomeFollowerWithLock()
+				if reply.VoteGranted {
+					atomic.AddInt32(&count, 1)
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.BecomeFollowerWithLock()
+					}
 				}
 			}(i)
 		}
 		isEnd := make(chan bool)
 		go func() {
 			w.Wait()
-			isEnd <- true
+			isEnd <- false
 		}()
 
 		select {
@@ -563,15 +632,16 @@ func (rf *Raft) HeartBeat() {
 				}
 				args := &AppendEntryArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1, rf.log[rf.nextIndex[i]-1].Term, l, rf.commitIndex}
 				reply := &AppendEntryReply{0, false, 0}
-				go func(i int) {
-					ok := rf.sendAppendEntries(i, args, reply)
-					if !ok {
-						return
-					}
-				}(i)
+				curr := i
+				go func() {
+					rf.sendAppendEntries(curr, args, reply)
+				}()
 			}
 		}
 		rf.mu.Unlock()
+		if rf.killed() {
+			return
+		}
 	}
 }
 
@@ -590,7 +660,8 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 			}
 			if rf.nextIndex[peer] >= len(rf.log) {
 				rf.logPrintfWithLock("to %v synchronize process finished", peer)
-				//break
+				rf.mu.Unlock()
+				break
 			}
 
 			//截取要同步的数据
@@ -599,13 +670,13 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 			copy(data, rf.log[rf.nextIndex[peer]:len(rf.log)])
 
 			args := &AppendEntryArgs{rf.currentTerm, rf.me, rf.nextIndex[peer] - 1, rf.log[rf.nextIndex[peer]-1].Term, data, rf.commitIndex}
-			reply := &AppendEntryReply{}
+			reply := &AppendEntryReply{0, false, 0}
 
 			rf.mu.Unlock()
 
 			w := sync.WaitGroup{}
 			w.Add(1)
-			var ok bool
+			ok := false
 
 			go func() {
 				ok = rf.sendAppendEntries(peer, args, reply)
@@ -615,7 +686,7 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 			ch := make(chan bool)
 			go func() {
 				w.Wait()
-				ch <- true
+				ch <- false
 			}()
 
 			select {
