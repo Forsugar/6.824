@@ -204,102 +204,103 @@ func (rf *Raft) logPrintfWithLock(format string, vars ...interface{}) {
 //
 // example RequestVote RPC handler.
 //
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.VoteGranted = true
+
+	if args.Term <= rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+
+	n := len(rf.log)
+	if rf.log[n-1].Term > args.LastLogTerm ||
+		(rf.log[n-1].Term == args.LastLogTerm && n > args.LastLogIndex) {
+		rf.currentTerm = args.Term
+		if rf.state == LEADER {
+			rf.BecomeFollowerWithLock()
+		}
+		reply.Term = args.Term
+		reply.VoteGranted = false
+		return
+	}
+
+	rf.currentTerm = args.Term
+	rf.BecomeFollowerWithLock()
+	if rf.votedFor != -1 {
+		reply.VoteGranted = false
+	} else {
+		rf.votedFor = args.CandidateId
+		rf.logPrintfWithLock("voted for %v", args.CandidateId)
+	}
+	reply.Term = rf.currentTerm
+}
+
 //func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-//	// Your code here (2A, 2B).
 //	rf.mu.Lock()
 //	defer rf.mu.Unlock()
+//	//log.Printf("Peer %d(%d) :%d(%d) request vote",rf.me,rf.term,args.Candidate,args.Term)
+//	if args.Term <= rf.currentTerm {
 //
-//	reply.VoteGranted = true
+//		log.Printf("Peer %d(%d) :%d(%d) request vote,term is less my term,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+//		reply.Term = args.Term
+//		reply.VoteGranted = false
 //
-//	if len(rf.log) > 0 {
-//		n := len(rf.log)
-//		if rf.log[n-1].Term > args.LastLogTerm ||
-//			(rf.log[n-1].Term == args.LastLogTerm && rf.log[n-1].Index > args.LastLogIndex) {
+//		return
+//	} else {
+//		if args.LastLogTerm > rf.log[len(rf.log)-1].Term {
+//			log.Printf("Peer %d(%d) :%d(%d) request vote,log index is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+//			rf.currentTerm = args.Term
+//			rf.BecomeFollowerWithLock()
+//			rf.votedFor = args.CandidateId
+//			rf.persist()
+//			reply.Term = rf.currentTerm
+//			reply.VoteGranted = true
+//			return
+//		} else if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
+//			if args.LastLogIndex >= len(rf.log) {
+//				log.Printf("Peer %d(%d) :%d(%d) request vote,log term is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+//				rf.currentTerm = args.Term
+//				rf.BecomeFollowerWithLock()
+//				rf.votedFor = args.CandidateId
+//				rf.persist()
+//				reply.Term = rf.currentTerm
+//				reply.VoteGranted = true
+//				return
+//			} else {
+//				if rf.state == LEADER { //leader需要转换成为follower，启动定时器
+//					rf.currentTerm = args.Term
+//					rf.BecomeFollowerWithLock()
+//				}
+//				//follower和candidate不需要重启定时器，修改term就行了
+//				rf.currentTerm = args.Term
+//				rf.persist()
+//				log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+//				reply.Term = rf.currentTerm
+//				reply.VoteGranted = false
+//				return
+//			}
+//		} else {
+//			log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+//			if rf.state == LEADER { //leader需要转换成为follower，启动定时器
+//				rf.currentTerm = args.Term
+//				rf.BecomeFollowerWithLock()
+//			}
+//			//follower和candidate不需要重启定时器，修改term就行了
+//			rf.currentTerm = args.Term
+//			rf.persist()
+//			reply.Term = rf.currentTerm
 //			reply.VoteGranted = false
 //			return
 //		}
 //	}
 //
-//	if args.Term <= rf.currentTerm {
-//		reply.Term = rf.currentTerm
-//		reply.VoteGranted = false
-//		return
-//	} else {
-//		rf.currentTerm = args.Term
-//		if rf.state != FOLLOWER {
-//			rf.BecomeFollowerWithLock()
-//		}
-//		if rf.votedFor != -1 {
-//			reply.VoteGranted = false
-//		} else {
-//			rf.votedFor = args.CandidateId
-//			rf.logPrintfWithLock("voted for %v", args.CandidateId)
-//		}
-//		reply.Term = rf.currentTerm
-//	}
+//	// Your code here (2A, 2B).
 //}
-
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	//log.Printf("Peer %d(%d) :%d(%d) request vote",rf.me,rf.term,args.Candidate,args.Term)
-	if args.Term <= rf.currentTerm {
-
-		log.Printf("Peer %d(%d) :%d(%d) request vote,term is less my term,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-		reply.Term = args.Term
-		reply.VoteGranted = false
-
-		return
-	} else {
-		if args.LastLogTerm > rf.log[len(rf.log)-1].Term {
-			log.Printf("Peer %d(%d) :%d(%d) request vote,log index is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-			rf.currentTerm = args.Term
-			rf.BecomeFollowerWithLock()
-			rf.votedFor = args.CandidateId
-			rf.persist()
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = true
-			return
-		} else if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
-			if args.LastLogIndex >= len(rf.log) {
-				log.Printf("Peer %d(%d) :%d(%d) request vote,log term is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-				rf.currentTerm = args.Term
-				rf.BecomeFollowerWithLock()
-				rf.votedFor = args.CandidateId
-				rf.persist()
-				reply.Term = rf.currentTerm
-				reply.VoteGranted = true
-				return
-			} else {
-				if rf.state == LEADER { //leader需要转换成为follower，启动定时器
-					rf.currentTerm = args.Term
-					rf.BecomeFollowerWithLock()
-				}
-				//follower和candidate不需要重启定时器，修改term就行了
-				rf.currentTerm = args.Term
-				rf.persist()
-				log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-				reply.Term = rf.currentTerm
-				reply.VoteGranted = false
-				return
-			}
-		} else {
-			log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-			if rf.state == LEADER { //leader需要转换成为follower，启动定时器
-				rf.currentTerm = args.Term
-				rf.BecomeFollowerWithLock()
-			}
-			//follower和candidate不需要重启定时器，修改term就行了
-			rf.currentTerm = args.Term
-			rf.persist()
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
-			return
-		}
-	}
-
-	// Your code here (2A, 2B).
-}
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
@@ -522,7 +523,7 @@ func (rf *Raft) BecomeCandidate() {
 		args.CandidateId = rf.me
 		args.Term = rf.currentTerm
 		//args.LastLogIndex = rf.log[len(rf.log)-1].Index
-		args.LastLogIndex = len(rf.log)
+		args.LastLogIndex = len(rf.log) // 之前一直跑不通的原因
 		args.LastLogTerm = rf.log[len(rf.log)-1].Term
 
 		rf.mu.Unlock()
@@ -556,7 +557,7 @@ func (rf *Raft) BecomeCandidate() {
 		isEnd := make(chan bool)
 		go func() {
 			w.Wait()
-			isEnd <- false
+			isEnd <- true
 		}()
 
 		select {
@@ -686,7 +687,7 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 			ch := make(chan bool)
 			go func() {
 				w.Wait()
-				ch <- false
+				ch <- true
 			}()
 
 			select {
@@ -740,7 +741,6 @@ func (rf *Raft) BackWork() {
 			return
 		}
 		rf.mu.Lock()
-		//log.Print("matchIndex",rf.matchIndex)
 		mi := make([]int, len(rf.matchIndex))
 		copy(mi, rf.matchIndex)
 		mi[rf.me] = len(rf.log) - 1
@@ -756,7 +756,7 @@ func (rf *Raft) BackWork() {
 		}
 		rf.persist()
 		for ; rf.lastApplied <= rf.commitIndex; rf.lastApplied++ {
-			log.Printf("Peer %d(%d) :%d apply", rf.me, rf.currentTerm, rf.lastApplied)
+			log.Printf("%d apply", rf.lastApplied)
 			if rf.log[rf.lastApplied].IsEmpty { //非用户指令，不用apply
 				continue
 			} else {
