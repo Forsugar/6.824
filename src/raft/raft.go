@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"labgob"
 	"log"
 	"math/rand"
 	"os"
@@ -29,9 +31,6 @@ import (
 )
 import "sync/atomic"
 import "labrpc"
-
-// import "bytes"
-// import "../labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -123,12 +122,15 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -140,17 +142,22 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currntTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currntTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		rf.logPrintf("read persist error!")
+	} else {
+		rf.mu.Lock()
+		rf.currentTerm = currntTerm
+		rf.votedFor = votedFor
+		rf.log = log
+		rf.logPrintfWithLock("read persist success!")
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -224,6 +231,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.state == LEADER {
 			rf.BecomeFollowerWithLock()
 		}
+		rf.persist()
 		reply.Term = args.Term
 		reply.VoteGranted = false
 		return
@@ -237,70 +245,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.logPrintfWithLock("voted for %v", args.CandidateId)
 	}
+	rf.persist()
 	reply.Term = rf.currentTerm
 }
-
-//func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-//	rf.mu.Lock()
-//	defer rf.mu.Unlock()
-//	//log.Printf("Peer %d(%d) :%d(%d) request vote",rf.me,rf.term,args.Candidate,args.Term)
-//	if args.Term <= rf.currentTerm {
-//
-//		log.Printf("Peer %d(%d) :%d(%d) request vote,term is less my term,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-//		reply.Term = args.Term
-//		reply.VoteGranted = false
-//
-//		return
-//	} else {
-//		if args.LastLogTerm > rf.log[len(rf.log)-1].Term {
-//			log.Printf("Peer %d(%d) :%d(%d) request vote,log index is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-//			rf.currentTerm = args.Term
-//			rf.BecomeFollowerWithLock()
-//			rf.votedFor = args.CandidateId
-//			rf.persist()
-//			reply.Term = rf.currentTerm
-//			reply.VoteGranted = true
-//			return
-//		} else if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
-//			if args.LastLogIndex >= len(rf.log) {
-//				log.Printf("Peer %d(%d) :%d(%d) request vote,log term is bigger,vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-//				rf.currentTerm = args.Term
-//				rf.BecomeFollowerWithLock()
-//				rf.votedFor = args.CandidateId
-//				rf.persist()
-//				reply.Term = rf.currentTerm
-//				reply.VoteGranted = true
-//				return
-//			} else {
-//				if rf.state == LEADER { //leader需要转换成为follower，启动定时器
-//					rf.currentTerm = args.Term
-//					rf.BecomeFollowerWithLock()
-//				}
-//				//follower和candidate不需要重启定时器，修改term就行了
-//				rf.currentTerm = args.Term
-//				rf.persist()
-//				log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-//				reply.Term = rf.currentTerm
-//				reply.VoteGranted = false
-//				return
-//			}
-//		} else {
-//			log.Printf("Peer %d(%d) :%d(%d) request vote,log is not newer,do not vote", rf.me, rf.currentTerm, args.CandidateId, args.Term)
-//			if rf.state == LEADER { //leader需要转换成为follower，启动定时器
-//				rf.currentTerm = args.Term
-//				rf.BecomeFollowerWithLock()
-//			}
-//			//follower和candidate不需要重启定时器，修改term就行了
-//			rf.currentTerm = args.Term
-//			rf.persist()
-//			reply.Term = rf.currentTerm
-//			reply.VoteGranted = false
-//			return
-//		}
-//	}
-//
-//	// Your code here (2A, 2B).
-//}
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
@@ -354,6 +301,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			if rf.commitIndex < args.LeaderCommit {
 				rf.commitIndex = Min(args.LeaderCommit, Max(args.PrevLogIndex, rf.commitIndex)) // why ??
 			}
+			rf.persist()
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -446,6 +394,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.log) - rf.GetEmptyLogCountWithLock() + 1
 	l := LogEntry{index, term, command, false, false}
 	rf.log = append(rf.log, l)
+	rf.persist()
 
 	rf.logPrintfWithLock("Leader Start log index:%d,term:%d", index, term)
 
@@ -517,7 +466,6 @@ func (rf *Raft) BecomeCandidate() {
 		rf.persist()
 
 		args := RequestVoteArgs{}
-		reply := RequestVoteReply{0, false}
 
 		//初始化voteRPC args
 		args.CandidateId = rf.me
@@ -532,6 +480,7 @@ func (rf *Raft) BecomeCandidate() {
 		var count int32 = 1
 
 		for i, _ := range rf.peers {
+			reply := RequestVoteReply{0, false} //复用同一个会报错
 			if i == rf.me {
 				continue
 			}
@@ -582,6 +531,7 @@ func (rf *Raft) BecomeCandidate() {
 		}
 
 		rf.BecomeFollowerWithLock()
+		rf.persist()
 		rf.mu.Unlock()
 		return
 
@@ -609,6 +559,9 @@ func (rf *Raft) BecomeLeaderWithLock() {
 
 	l := LogEntry{0, rf.currentTerm, -1, false, true}
 	rf.log = append(rf.log, l)
+
+	rf.persist()
+
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -687,7 +640,7 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 			ch := make(chan bool)
 			go func() {
 				w.Wait()
-				ch <- true
+				ch <- false
 			}()
 
 			select {
@@ -706,17 +659,20 @@ func (rf *Raft) sendAppendEntriesFunc(peer int) {
 					rf.logPrintfWithLock("SYN append entry send success, nextIndex: %v, matchIndex :%v", rf.nextIndex[peer], rf.matchIndex[peer])
 					rf.mu.Unlock()
 				} else {
+					rf.mu.Lock()
 					if reply.Term <= rf.currentTerm { //term比我小但是添加失败，是因为没有match，调整nextIndex
-						rf.mu.Lock()
 						rf.logPrintfWithLock("SYN append entry send %v fail, match failed, change to %v", rf.nextIndex[peer], reply.CommitIndex+1)
 						rf.nextIndex[peer] = reply.CommitIndex + 1 //从commit的下一个log开始发
 						rf.mu.Unlock()
 					} else {
 						//waiting for a new leader
+						rf.mu.Unlock()
+						rf.logPrintf("need a new leader")
 						return
 					}
 				}
 			} else {
+				rf.logPrintf("syn ok is false")
 				break
 			}
 
@@ -860,7 +816,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rand.Seed(time.Now().UnixNano())
 
 	// initialize from state persisted before a crash
-	// rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState())
 
 	rf.logPrintfWithLock("begin")
 	go rf.Timer()
